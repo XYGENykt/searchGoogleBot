@@ -21,6 +21,13 @@ type Result struct {
 	Result   *customsearch.Result
 }
 
+type SearchResult struct {
+	Position int64  // Позиция в результатах поиска
+	Link     string // URL результата
+	Title    string // Заголовок
+	Snippet  string // Описание/сниппет
+}
+
 func main() {
 
 	// Load .env file
@@ -57,13 +64,25 @@ func main() {
 		if update.Message != nil {
 			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 
-			msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, update.Message.Text+" автор сообщения("+update.Message.From.UserName+")")
+			//возвращаю структуру response с ответом от гугла
+			response := gSearch(SEARCH_ENGINE_ID, update.Message.Text)
+
+			//вывожу данные структуры в терминал
+			printSearchResult(response)
+
+			//msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, response.Title+response.Snippet+" автор сообщения("+update.Message.From.UserName+")")
+			//делаю сообщение форматированным и читаемым, скидываю в группу и лично адресату
+			messageRes := fmt.Sprintf("URL: %s\nЗаголовок: %s\nОписание: %s\n", response.Link, response.Title, response.Snippet)
+			msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, messageRes)
 			bot.Send(msgToMyChannel)
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, update.Message.Text)
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, response.Title+response.Snippet)
 			bot.Send(msg)
 		}
 	}
 
+}
+
+func gSearch(searchEngineId string, query string) SearchResult {
 	// Load search key
 	data, err := os.ReadFile("search-key.json")
 	if err != nil {
@@ -86,18 +105,31 @@ func main() {
 		log.Fatal(err)
 	}
 
-	search := cseService.Cse.List().Q("labis").Cx(SEARCH_ENGINE_ID)
+	search := cseService.Cse.List().Q(query).Cx(searchEngineId)
 	result := doSearch(search)
 
 	if result.Position == 0 {
 		log.Fatal("No results found in the top 10 pages.\n")
 	}
 
-	fmt.Printf("Result found for \"%s\"!\n", "google.com")
-	fmt.Printf("Position: %d\n", result.Position)
-	fmt.Printf("Url: %s\n", result.Result.Link)
-	fmt.Printf("Title: %s\n", result.Result.Title)
-	fmt.Printf("Snippet: %s\n", result.Result.Snippet)
+	res := SearchResult{
+		Position: result.Position,
+		Link:     result.Result.Link,
+		Title:    result.Result.Title,
+		Snippet:  result.Result.Snippet,
+	}
+	return res
+}
+
+func printSearchResult(r SearchResult) {
+	fmt.Println("Результат поиска:")
+	fmt.Println("----------------")
+	fmt.Printf("Позиция: %d\nURL: %s\nЗаголовок: %s\nОписание: %s\n",
+		r.Position,
+		r.Link,
+		r.Title,
+		r.Snippet,
+	)
 }
 
 func doSearch(search *customsearch.CseListCall) (result Result) {
