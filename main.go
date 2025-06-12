@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strconv"
 
 	"fmt"
@@ -62,37 +63,68 @@ func main() {
 
 	for update := range updates {
 		if update.Message != nil {
+
 			log.Printf("[%s] %s", update.Message.From.UserName, update.Message.Text)
 
-			//возвращаю структуру response с ответом от гугла
-			response := gSearch(SEARCH_ENGINE_ID, update.Message.Text)
+			msgW := tgbotapi.NewMessage(update.Message.Chat.ID, "Идет запрос в гугл, ждите")
+			bot.Send(msgW)
 
-			//вывожу данные структуры в терминал
+			msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, "Идет запрос в гугл, ждите "+update.Message.From.UserName)
+			bot.Send(msgToMyChannel)
+
+			//делаю запрос в гугл, возвращаю структуру response с ответом или с ошибкой
+			response, err := gSearch(SEARCH_ENGINE_ID, update.Message.Text)
+			if err != nil {
+				msgW = tgbotapi.NewMessage(update.Message.Chat.ID, "Произошла ошибка")
+				bot.Send(msgW)
+
+				msgW = tgbotapi.NewMessage(update.Message.Chat.ID, err.Error())
+				bot.Send(msgW)
+
+				msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, err.Error())
+				bot.Send(msgToMyChannel)
+			}
+			//вывожу данные структуры в терминал для дебага
 			printSearchResult(response)
 
-			//msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, response.Title+response.Snippet+" автор сообщения("+update.Message.From.UserName+")")
-			//делаю сообщение форматированным и читаемым, скидываю в группу и лично адресату
-			messageRes := fmt.Sprintf("URL: %s\nЗаголовок: %s\nОписание: %s\n", response.Link, response.Title, response.Snippet)
-			msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, messageRes)
-			bot.Send(msgToMyChannel)
-			msg := tgbotapi.NewMessage(update.Message.Chat.ID, response.Title+response.Snippet)
-			bot.Send(msg)
+			//если вернулась пустая структура с резултатами
+			if response == (SearchResult{}) {
+				messageRes := fmt.Sprintf("Попробуйте позже, скорее всего закончился бесплатный лимит запросов ")
+
+				msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, messageRes+update.Message.From.UserName)
+				bot.Send(msgToMyChannel)
+
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, messageRes)
+				bot.Send(msg)
+			} else {
+
+				//делаю сообщение форматированным и читаемым, скидываю в группу и лично адресату
+				messageRes := fmt.Sprintf("URL: %s\nЗаголовок: %s\nОписание: %s\n", response.Link, response.Title, response.Snippet)
+
+				msgToMyChannel := tgbotapi.NewMessage(CHAT_ID, messageRes)
+				bot.Send(msgToMyChannel)
+
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, messageRes)
+				bot.Send(msg)
+			}
+
 		}
 	}
 
 }
 
-func gSearch(searchEngineId string, query string) SearchResult {
+func gSearch(searchEngineId string, query string) (SearchResult, error) {
 	// Load search key
 	data, err := os.ReadFile("search-key.json")
 	if err != nil {
-		log.Fatal(err)
+		//return SearchResult{}, fmt.Errorf("не найден конфиг search-key: %w", err)
+		return SearchResult{}, err
 	}
 
 	// Get the config from the json key file with the correct scope
 	conf, err := google.JWTConfigFromJSON(data, "https://www.googleapis.com/auth/cse")
 	if err != nil {
-		log.Fatal(err)
+		return SearchResult{}, err
 	}
 
 	// Create context and client
@@ -102,14 +134,19 @@ func gSearch(searchEngineId string, query string) SearchResult {
 	// Create custom search service with the authenticated client
 	cseService, err := customsearch.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		log.Fatal(err)
+		return SearchResult{}, err
 	}
 
 	search := cseService.Cse.List().Q(query).Cx(searchEngineId)
-	result := doSearch(search)
+
+	result, err := doSearch(search)
+	if err != nil {
+		return SearchResult{}, err
+	}
 
 	if result.Position == 0 {
-		log.Fatal("No results found in the top 10 pages.\n")
+		err := errors.New("No results found in the top 10 pages")
+		return SearchResult{}, err
 	}
 
 	res := SearchResult{
@@ -118,7 +155,7 @@ func gSearch(searchEngineId string, query string) SearchResult {
 		Title:    result.Result.Title,
 		Snippet:  result.Result.Snippet,
 	}
-	return res
+	return res, nil
 }
 
 func printSearchResult(r SearchResult) {
@@ -132,14 +169,15 @@ func printSearchResult(r SearchResult) {
 	)
 }
 
-func doSearch(search *customsearch.CseListCall) (result Result) {
+func doSearch(search *customsearch.CseListCall) (result Result, err1 error) {
 	start := int64(1)
 
 	// CSE Limits you to 10 pages of results with max 10 results per page
 	for start < 100 {
 		call, err := search.Start(start).Do()
 		if err != nil {
-			log.Fatal(err)
+			//log.Fatal(err)
+			return Result{}, err
 		}
 
 		position, csResult := findDomain(call.Items, start)
@@ -148,28 +186,28 @@ func doSearch(search *customsearch.CseListCall) (result Result) {
 				Position: position,
 				Result:   csResult,
 			}
-			return
+			return result, nil
 		}
 
 		// Проверяем TotalResults (который является строкой)
 		totalResults, err := strconv.ParseInt(call.SearchInformation.TotalResults, 10, 64)
 		if err != nil {
-			log.Printf("Error parsing total results: %v", err)
-			return
+			//log.Printf("Error parsing total results: %v", err)
+			return Result{}, err
 		}
 
 		// No more search results?
 		if totalResults < start {
-			return
+			return result, nil
 		}
 		start += 10
 	}
-	return
+	return result, nil
 }
 
 func findDomain(results []*customsearch.Result, start int64) (position int64, result *customsearch.Result) {
 	for index, r := range results {
-		if strings.Contains(r.Link, "google.com") {
+		if strings.Contains(r.Link, "") {
 			return int64(index) + start, r
 		}
 	}
